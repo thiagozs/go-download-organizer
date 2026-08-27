@@ -8,13 +8,15 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "dl-organizer",
-	Short: "Organize your Downloads folder automatically",
+	Use:           "dl-organizer",
+	Short:         "Organize your Downloads folder automatically",
+	SilenceErrors: true,
+	SilenceUsage:  true,
 }
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }

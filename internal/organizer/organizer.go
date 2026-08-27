@@ -20,7 +20,7 @@ func Run(opts Options) error {
 	}
 
 	total := len(entries)
-	progress := newProgressRenderer(total)
+	progress := newProgressRenderer(total, opts.DryRun)
 
 	for _, entry := range entries {
 		fullPath := filepath.Join(opts.Source, entry.Name())
@@ -32,67 +32,100 @@ func Run(opts Options) error {
 		}
 
 		if entry.IsDir() {
-			category := detectDirectoryCategory(fullPath)
-			if err := processDirectory(fullPath, category, opts); err != nil {
-				progress.finishWithError(err)
+			category, err := detectDirectoryCategory(fullPath)
+			if err != nil {
+				progress.stop()
+				return fmt.Errorf("classify directory %q: %w", fullPath, err)
+			}
+			targetPath, err := processDirectory(fullPath, category, opts)
+			if err != nil {
+				progress.stop()
 				return err
 			}
-			progress.advance(filepath.Base(fullPath), category, true)
+			progress.advance(filepath.Base(fullPath), displayTarget(opts.Source, targetPath), category, true)
 			continue
 		}
 
-		if err := processFile(fullPath, opts); err != nil {
-			progress.finishWithError(err)
+		regular, err := isRegularEntry(entry)
+		if err != nil {
+			progress.stop()
+			return fmt.Errorf("inspect %q: %w", fullPath, err)
+		}
+		if !regular {
+			progress.renderSkippedItem(entry.Name())
+			continue
+		}
+
+		category := Classify(fullPath)
+		targetPath, err := processFile(fullPath, category, opts)
+		if err != nil {
+			progress.stop()
 			return err
 		}
-		progress.advance(filepath.Base(fullPath), Classify(fullPath), false)
+		progress.advance(filepath.Base(fullPath), displayTarget(opts.Source, targetPath), category, false)
 	}
 
 	progress.finish()
 	return nil
 }
 
-func processFile(path string, opts Options) error {
+func processFile(path, category string, opts Options) (string, error) {
 	fileName := filepath.Base(path)
-	category := Classify(path)
-
-	targetDir := filepath.Join(opts.Source, category)
-	targetPath := filepath.Join(targetDir, fileName)
+	targetDir, err := resolveCategoryDir(opts.Source, category)
+	if err != nil {
+		return "", err
+	}
+	targetPath, err := availableTargetPath(filepath.Join(targetDir, fileName), false)
+	if err != nil {
+		return "", err
+	}
 
 	if opts.DryRun {
-		return nil
+		return targetPath, nil
 	}
 
 	if err := os.MkdirAll(targetDir, os.ModePerm); err != nil {
-		return err
+		return "", fmt.Errorf("create category directory %q: %w", targetDir, err)
 	}
 
-	return os.Rename(path, targetPath)
+	if err := os.Rename(path, targetPath); err != nil {
+		return "", fmt.Errorf("move %q to %q: %w", path, targetPath, err)
+	}
+	return targetPath, nil
 }
 
-func processDirectory(dir, category string, opts Options) error {
-	targetDir := filepath.Join(opts.Source, category)
-	targetPath := filepath.Join(targetDir, filepath.Base(dir))
+func processDirectory(dir, category string, opts Options) (string, error) {
+	targetDir, err := resolveCategoryDir(opts.Source, category)
+	if err != nil {
+		return "", err
+	}
+	targetPath, err := availableTargetPath(filepath.Join(targetDir, filepath.Base(dir)), true)
+	if err != nil {
+		return "", err
+	}
 
 	if opts.DryRun {
-		return nil
+		return targetPath, nil
 	}
 
 	if err := os.MkdirAll(targetDir, os.ModePerm); err != nil {
-		return err
+		return "", fmt.Errorf("create category directory %q: %w", targetDir, err)
 	}
 
-	return os.Rename(dir, targetPath)
+	if err := os.Rename(dir, targetPath); err != nil {
+		return "", fmt.Errorf("move %q to %q: %w", dir, targetPath, err)
+	}
+	return targetPath, nil
 }
 
-func detectDirectoryCategory(dir string) string {
+func detectDirectoryCategory(dir string) (string, error) {
 	count := make(map[string]int)
 	total := 0
 
 	if err := filepath.WalkDir(dir, func(path string,
 		d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil // ignora erro e continua
+			return err
 		}
 
 		if d.IsDir() {
@@ -102,44 +135,145 @@ func detectDirectoryCategory(dir string) string {
 			return nil
 		}
 
+		regular, err := isRegularEntry(d)
+		if err != nil {
+			return err
+		}
+		if !regular {
+			return nil
+		}
+
 		category := Classify(path)
 		count[category]++
 		total++
 
 		return nil
 	}); err != nil {
-		return "others" // fallback se erro
+		return "", err
 	}
 
 	if total == 0 {
-		return "others"
+		return "others", nil
 	}
 
-	// encontra categoria dominante
 	max := 0
 	dominant := "others"
+	tied := false
 
 	for cat, c := range count {
 		if c > max {
 			max = c
 			dominant = cat
+			tied = false
+		} else if c == max {
+			tied = true
 		}
 	}
 
-	return dominant
+	if tied {
+		return "others", nil
+	}
+
+	return dominant, nil
+}
+
+func isRegularEntry(entry fs.DirEntry) (bool, error) {
+	if entry.Type()&os.ModeSymlink != 0 {
+		return false, nil
+	}
+
+	info, err := entry.Info()
+	if err != nil {
+		return false, err
+	}
+	return info.Mode().IsRegular(), nil
+}
+
+func resolveCategoryDir(source, category string) (string, error) {
+	exact := filepath.Join(source, category)
+	if info, err := os.Lstat(exact); err == nil {
+		if info.IsDir() {
+			return exact, nil
+		}
+		return "", fmt.Errorf("category destination %q exists and is not a directory", exact)
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect category directory %q: %w", exact, err)
+	}
+
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		return "", fmt.Errorf("read source directory %q: %w", source, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.EqualFold(entry.Name(), category) {
+			return filepath.Join(source, entry.Name()), nil
+		}
+	}
+
+	return exact, nil
+}
+
+func availableTargetPath(targetPath string, isDir bool) (string, error) {
+	if _, err := os.Lstat(targetPath); os.IsNotExist(err) {
+		return targetPath, nil
+	} else if err != nil {
+		return "", fmt.Errorf("inspect destination %q: %w", targetPath, err)
+	}
+
+	dir := filepath.Dir(targetPath)
+	base := filepath.Base(targetPath)
+	stem, ext := base, ""
+	if !isDir {
+		stem, ext = splitExtension(base)
+	}
+
+	for suffix := 1; ; suffix++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("%s (%d)%s", stem, suffix, ext))
+		if _, err := os.Lstat(candidate); os.IsNotExist(err) {
+			return candidate, nil
+		} else if err != nil {
+			return "", fmt.Errorf("inspect destination %q: %w", candidate, err)
+		}
+	}
+}
+
+func splitExtension(name string) (string, string) {
+	lower := strings.ToLower(name)
+	ext := filepath.Ext(name)
+	for multiExt := range multiExtMap {
+		if strings.HasSuffix(lower, multiExt) && len(multiExt) > len(ext) {
+			ext = name[len(name)-len(multiExt):]
+		}
+	}
+	stem := strings.TrimSuffix(name, ext)
+	if stem == "" {
+		return name, ""
+	}
+	return stem, ext
+}
+
+func displayTarget(source, targetPath string) string {
+	relative, err := filepath.Rel(source, targetPath)
+	if err != nil {
+		return targetPath
+	}
+	return filepath.ToSlash(relative)
 }
 
 type progressRenderer struct {
 	total     int
 	processed int
 	skipped   int
+	inline    bool
 }
 
-func newProgressRenderer(total int) *progressRenderer {
-	return &progressRenderer{total: total}
+func newProgressRenderer(total int, dryRun bool) *progressRenderer {
+	info, err := os.Stdout.Stat()
+	inline := err == nil && info.Mode()&os.ModeCharDevice != 0 && !dryRun
+	return &progressRenderer{total: total, inline: inline}
 }
 
-func (p *progressRenderer) advance(name, category string, isDir bool) {
+func (p *progressRenderer) advance(name, target, category string, isDir bool) {
 	p.processed++
 
 	kindIcon := "📄"
@@ -147,7 +281,7 @@ func (p *progressRenderer) advance(name, category string, isDir bool) {
 		kindIcon = "📁"
 	}
 
-	status := fmt.Sprintf("%s %s  %s -> %s", kindIcon, trimName(name), iconForCategory(category), category)
+	status := fmt.Sprintf("%s %s  %s -> %s", kindIcon, trimName(name), iconForCategory(category), target)
 	p.render(status)
 }
 
@@ -157,22 +291,36 @@ func (p *progressRenderer) renderSkippedDir(name string) {
 	p.render(status)
 }
 
+func (p *progressRenderer) renderSkippedItem(name string) {
+	p.skipped++
+	status := fmt.Sprintf("⏭️  %s  ignorado (não é arquivo regular)", trimName(name))
+	p.render(status)
+}
+
 func (p *progressRenderer) finish() {
 	status := fmt.Sprintf("✅ concluido  processados: %d  ignorados: %d", p.processed, p.skipped)
 	p.render(status)
-	fmt.Println()
+	if p.inline {
+		fmt.Println()
+	}
 }
 
-func (p *progressRenderer) finishWithError(err error) {
-	status := fmt.Sprintf("❌ erro  %s", trimName(err.Error()))
-	p.render(status)
-	fmt.Println()
+func (p *progressRenderer) stop() {
+	if p.inline {
+		fmt.Println()
+	}
 }
 
 func (p *progressRenderer) render(status string) {
 	current := p.processed + p.skipped
+	prefix := ""
+	suffix := "\n"
+	if p.inline {
+		prefix = "\r"
+		suffix = "\033[K"
+	}
 	if p.total == 0 {
-		fmt.Printf("\r[%s] 100%% (0/0) %s\033[K", strings.Repeat("=", 18), status)
+		fmt.Printf("%s[%s] 100%% (0/0) %s%s", prefix, strings.Repeat("=", 18), status, suffix)
 		return
 	}
 
@@ -193,7 +341,7 @@ func (p *progressRenderer) render(status string) {
 		bar = strings.Repeat("=", barWidth)
 	}
 
-	fmt.Printf("\r[%s] %3d%% (%d/%d) %s\033[K", bar, percent, current, p.total, status)
+	fmt.Printf("%s[%s] %3d%% (%d/%d) %s%s", prefix, bar, percent, current, p.total, status, suffix)
 }
 
 func trimName(name string) string {
