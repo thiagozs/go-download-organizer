@@ -13,6 +13,7 @@ var (
 var organizeCmd = &cobra.Command{
 	Use:   "organize",
 	Short: "Organize files in a directory",
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		opts := organizer.Options{
 			Source: source,

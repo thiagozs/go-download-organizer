@@ -11,8 +11,10 @@ O projeto varre o diretório informado, identifica o tipo dos arquivos por exten
 - Usa detecção por MIME type como fallback.
 - Aplica heurísticas por nome para casos comuns.
 - Ignora diretórios já organizados.
-- Suporta modo `dry-run` para simular a execução sem mover arquivos.
-- Exibe progresso inline em uma única linha no terminal.
+- Preserva arquivos existentes em colisões, adicionando sufixos como ` (1)`.
+- Ignora links simbólicos e outros arquivos especiais.
+- Suporta modo `dry-run`, listando cada operação sem mover arquivos.
+- Exibe progresso inline no terminal e saída linha a linha quando redirecionado.
 
 ## Categorias Suportadas
 
@@ -43,7 +45,9 @@ O organizador atualmente distribui itens nas seguintes categorias:
    - MIME type;
    - heurística por nome.
 4. Para diretórios, percorre os arquivos internos e escolhe a categoria dominante.
-5. Move o item para a pasta final correspondente dentro do diretório de origem.
+   Em caso de empate, usa a categoria `others`.
+5. Move o item para a pasta final correspondente dentro do diretório de origem,
+   sem sobrescrever itens existentes.
 
 ## Requisitos
 
