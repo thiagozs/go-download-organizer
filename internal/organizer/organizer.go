@@ -39,6 +39,10 @@ func Run(opts Options) error {
 		}
 
 		if entry.IsDir() {
+			if IsInProgress(entry.Name()) {
+				progress.skipped(entry.Name(), "download em andamento")
+				continue
+			}
 			category, err := detectDirectoryCategory(fullPath)
 			if err != nil {
 				progress.abort()
