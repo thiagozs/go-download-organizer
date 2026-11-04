@@ -11,7 +11,7 @@ var categorySet = map[string]struct{}{
 	"images": {}, "videos": {}, "audio": {}, "documents": {},
 	"archives": {}, "packages": {}, "code": {}, "config": {},
 	"scripts": {}, "devops": {}, "blockchain": {}, "data": {},
-	"design": {}, "others": {},
+	"design": {}, "temp": {}, "others": {},
 }
 
 func IsCategoryDir(name string) bool {
@@ -79,9 +79,45 @@ var extMap = map[string]string{
 	".psd": "design", ".ai": "design", ".fig": "design",
 }
 
+// Downloads em andamento: nunca devem ser movidos.
+var inProgressExts = map[string]struct{}{
+	".crdownload": {}, ".part": {}, ".partial": {}, ".download": {}, ".opdownload": {},
+}
+
+// Arquivos temporários, backups, logs e lixo de sistema.
+var tempExts = map[string]struct{}{
+	".tmp": {}, ".temp": {}, ".bak": {}, ".swp": {}, ".swo": {}, ".log": {}, ".old": {},
+}
+
+var tempNames = map[string]struct{}{
+	".ds_store": {}, "thumbs.db": {}, "desktop.ini": {},
+}
+
+// IsInProgress reports whether name looks like a partially downloaded file.
+func IsInProgress(name string) bool {
+	_, ok := inProgressExts[strings.ToLower(filepath.Ext(name))]
+	return ok
+}
+
+func isTemp(lower string) bool {
+	if _, ok := tempNames[lower]; ok {
+		return true
+	}
+	if strings.HasSuffix(lower, "~") || strings.HasPrefix(lower, "~$") {
+		return true
+	}
+	_, ok := tempExts[filepath.Ext(lower)]
+	return ok
+}
+
 func Classify(path string) string {
 	fileName := filepath.Base(path)
 	lower := strings.ToLower(fileName)
+
+	// 0 Temporários
+	if isTemp(lower) {
+		return "temp"
+	}
 
 	// 1 Multi-extensão
 	for ext, category := range multiExtMap {

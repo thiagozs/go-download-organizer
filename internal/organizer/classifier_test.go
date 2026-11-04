@@ -95,3 +95,26 @@ func TestFallbackCategory(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyTemporaryFiles(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"a.tmp", "b.BAK", "c.log", "doc.txt~", "~$report.docx", ".DS_Store", "Thumbs.db", "x.swp"} {
+		if got := Classify(name); got != "temp" {
+			t.Errorf("Classify(%q) = %q, want temp", name, got)
+		}
+	}
+}
+
+func TestIsInProgress(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"a.crdownload", "b.PART", "c.zip.download", "d.opdownload"} {
+		if !IsInProgress(name) {
+			t.Errorf("IsInProgress(%q) = false, want true", name)
+		}
+	}
+	if IsInProgress("a.zip") {
+		t.Error("a.zip should not be in progress")
+	}
+}

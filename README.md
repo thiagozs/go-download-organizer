@@ -33,6 +33,7 @@ O organizador atualmente distribui itens nas seguintes categorias:
 - `blockchain`
 - `data`
 - `design`
+- `temp`
 - `others`
 
 ## Como Funciona
@@ -51,7 +52,7 @@ O organizador atualmente distribui itens nas seguintes categorias:
 
 ## Requisitos
 
-- Go `1.26.0`
+- Go `1.27.0`
 
 ## Instalação
 
