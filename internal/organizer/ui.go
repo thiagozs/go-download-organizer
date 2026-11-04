@@ -83,7 +83,10 @@ func (r *reporter) line(s string) {
 	if r.live {
 		fmt.Fprint(r.out, "\r\033[K")
 	}
-	fmt.Fprintln(r.out, ansi.Truncate(s, r.width()-1, "…"))
+	if r.fd != 0 {
+		s = ansi.Truncate(s, r.width()-1, "…")
+	}
+	fmt.Fprintln(r.out, s)
 	r.bar()
 }
 
