@@ -1,8 +1,11 @@
 package organizer
 
 import (
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,7 +17,7 @@ func TestDetectDirectoryCategory(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, "photo.png"), []byte("png"))
 	mustWriteFile(t, filepath.Join(dir, "readme.txt"), []byte("txt"))
 
-	got, err := detectDirectoryCategory(dir)
+	got, _, err := detectDirectoryCategory(dir)
 	if err != nil {
 		t.Fatalf("detectDirectoryCategory(%q) error = %v", dir, err)
 	}
@@ -30,7 +33,7 @@ func TestDetectDirectoryCategorySkipsNestedCategoryDirs(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, "report.pdf"), []byte("pdf"))
 	mustWriteFile(t, filepath.Join(dir, "images", "photo.jpg"), []byte("jpg"))
 
-	got, err := detectDirectoryCategory(dir)
+	got, _, err := detectDirectoryCategory(dir)
 	if err != nil {
 		t.Fatalf("detectDirectoryCategory(%q) error = %v", dir, err)
 	}
@@ -46,7 +49,7 @@ func TestDetectDirectoryCategoryUsesOthersOnTie(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dir, "cover.jpg"), []byte("jpg"))
 	mustWriteFile(t, filepath.Join(dir, "report.pdf"), []byte("pdf"))
 
-	got, err := detectDirectoryCategory(dir)
+	got, _, err := detectDirectoryCategory(dir)
 	if err != nil {
 		t.Fatalf("detectDirectoryCategory(%q) error = %v", dir, err)
 	}
@@ -258,5 +261,69 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 	if string(content) != want {
 		t.Fatalf("content of %q = %q, want %q", path, content, want)
+	}
+}
+
+func TestRunSkipsInProgressAndMovesTemp(t *testing.T) {
+	source := t.TempDir()
+	for _, n := range []string{"movie.mp4.crdownload", "junk.tmp"} {
+		if err := os.WriteFile(filepath.Join(source, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := Run(Options{Source: source, Out: io.Discard}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(source, "movie.mp4.crdownload")); err != nil {
+		t.Errorf("in-progress download must stay in place: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(source, "temp", "junk.tmp")); err != nil {
+		t.Errorf("temp file should be moved to temp/: %v", err)
+	}
+}
+
+func TestDetectDirectoryCategoryIgnoresTempWhenOtherFilesExist(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	for _, n := range []string{"a.log", "b.tmp", "main.go"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _, err := detectDirectoryCategory(dir); err != nil || got != "code" {
+		t.Fatalf("got %q, %v; want code", got, err)
+	}
+
+	only := t.TempDir()
+	if err := os.WriteFile(filepath.Join(only, "a.log"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := detectDirectoryCategory(only); err != nil || got != "temp" {
+		t.Fatalf("got %q, %v; want temp", got, err)
+	}
+}
+
+func TestRunSkipsDirectoryWithInProgressDownload(t *testing.T) {
+	t.Parallel()
+
+	source := t.TempDir()
+	project := filepath.Join(source, "project")
+	download := filepath.Join(project, "movie.mp4.crdownload")
+	mustWriteFile(t, filepath.Join(project, "main.go"), []byte("package main"))
+	mustWriteFile(t, download, []byte("partial"))
+
+	var output bytes.Buffer
+	if err := Run(Options{Source: source, Out: &output}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	assertExists(t, project)
+	assertExists(t, download)
+	assertNotExists(t, filepath.Join(source, "code", "project"))
+	if !strings.Contains(output.String(), "contém download em andamento") {
+		t.Fatalf("Run() output = %q, want skipped directory to be reported", output.String())
 	}
 }

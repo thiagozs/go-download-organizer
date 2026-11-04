@@ -2,6 +2,7 @@ package organizer
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 type Options struct {
 	Source string
 	DryRun bool
+	// Out receives the progress output. Defaults to os.Stdout.
+	Out io.Writer
 }
 
 func Run(opts Options) error {
@@ -19,50 +22,67 @@ func Run(opts Options) error {
 		return err
 	}
 
-	total := len(entries)
-	progress := newProgressRenderer(total, opts.DryRun)
+	out := opts.Out
+	if out == nil {
+		out = os.Stdout
+	}
+	progress := newReporter(out, len(entries), opts.DryRun)
+	progress.header(opts.Source)
 
 	for _, entry := range entries {
 		fullPath := filepath.Join(opts.Source, entry.Name())
 
 		// IGNORA pastas já organizadas
 		if entry.IsDir() && IsCategoryDir(entry.Name()) {
-			progress.renderSkippedDir(entry.Name())
+			progress.skipped(entry.Name(), "já organizada")
 			continue
 		}
 
 		if entry.IsDir() {
-			category, err := detectDirectoryCategory(fullPath)
+			if IsInProgress(entry.Name()) {
+				progress.skipped(entry.Name(), "download em andamento")
+				continue
+			}
+			category, hasInProgressDownload, err := detectDirectoryCategory(fullPath)
 			if err != nil {
-				progress.stop()
+				progress.abort()
 				return fmt.Errorf("classify directory %q: %w", fullPath, err)
+			}
+			if hasInProgressDownload {
+				progress.skipped(entry.Name(), "contém download em andamento")
+				continue
 			}
 			targetPath, err := processDirectory(fullPath, category, opts)
 			if err != nil {
-				progress.stop()
+				progress.abort()
 				return err
 			}
-			progress.advance(filepath.Base(fullPath), displayTarget(opts.Source, targetPath), category, true)
+			progress.recordMove(filepath.Base(fullPath), displayTarget(opts.Source, targetPath), category, true)
 			continue
 		}
 
 		regular, err := isRegularEntry(entry)
 		if err != nil {
-			progress.stop()
+			progress.abort()
 			return fmt.Errorf("inspect %q: %w", fullPath, err)
 		}
 		if !regular {
-			progress.renderSkippedItem(entry.Name())
+			progress.skipped(entry.Name(), "não é arquivo regular")
+			continue
+		}
+
+		if IsInProgress(entry.Name()) {
+			progress.skipped(entry.Name(), "download em andamento")
 			continue
 		}
 
 		category := Classify(fullPath)
 		targetPath, err := processFile(fullPath, category, opts)
 		if err != nil {
-			progress.stop()
+			progress.abort()
 			return err
 		}
-		progress.advance(filepath.Base(fullPath), displayTarget(opts.Source, targetPath), category, false)
+		progress.recordMove(filepath.Base(fullPath), displayTarget(opts.Source, targetPath), category, false)
 	}
 
 	progress.finish()
@@ -118,9 +138,10 @@ func processDirectory(dir, category string, opts Options) (string, error) {
 	return targetPath, nil
 }
 
-func detectDirectoryCategory(dir string) (string, error) {
+func detectDirectoryCategory(dir string) (string, bool, error) {
 	count := make(map[string]int)
-	total := 0
+	total, tempCount := 0, 0
+	hasInProgressDownload := false
 
 	if err := filepath.WalkDir(dir, func(path string,
 		d fs.DirEntry, err error) error {
@@ -143,17 +164,31 @@ func detectDirectoryCategory(dir string) (string, error) {
 			return nil
 		}
 
+		if IsInProgress(d.Name()) {
+			hasInProgressDownload = true
+			return nil
+		}
+
 		category := Classify(path)
 		count[category]++
 		total++
+		if category == "temp" {
+			tempCount++
+		}
 
 		return nil
 	}); err != nil {
-		return "", err
+		return "", false, err
+	}
+
+	// Temporários só decidem a categoria quando são tudo o que a pasta tem.
+	if total > count["temp"] {
+		delete(count, "temp")
+		total -= tempCount
 	}
 
 	if total == 0 {
-		return "others", nil
+		return "others", hasInProgressDownload, nil
 	}
 
 	max := 0
@@ -171,10 +206,10 @@ func detectDirectoryCategory(dir string) (string, error) {
 	}
 
 	if tied {
-		return "others", nil
+		return "others", hasInProgressDownload, nil
 	}
 
-	return dominant, nil
+	return dominant, hasInProgressDownload, nil
 }
 
 func isRegularEntry(entry fs.DirEntry) (bool, error) {
@@ -258,131 +293,4 @@ func displayTarget(source, targetPath string) string {
 		return targetPath
 	}
 	return filepath.ToSlash(relative)
-}
-
-type progressRenderer struct {
-	total     int
-	processed int
-	skipped   int
-	inline    bool
-}
-
-func newProgressRenderer(total int, dryRun bool) *progressRenderer {
-	info, err := os.Stdout.Stat()
-	inline := err == nil && info.Mode()&os.ModeCharDevice != 0 && !dryRun
-	return &progressRenderer{total: total, inline: inline}
-}
-
-func (p *progressRenderer) advance(name, target, category string, isDir bool) {
-	p.processed++
-
-	kindIcon := "📄"
-	if isDir {
-		kindIcon = "📁"
-	}
-
-	status := fmt.Sprintf("%s %s  %s -> %s", kindIcon, trimName(name), iconForCategory(category), target)
-	p.render(status)
-}
-
-func (p *progressRenderer) renderSkippedDir(name string) {
-	p.skipped++
-	status := fmt.Sprintf("⏭️  %s  ignorado", trimName(name))
-	p.render(status)
-}
-
-func (p *progressRenderer) renderSkippedItem(name string) {
-	p.skipped++
-	status := fmt.Sprintf("⏭️  %s  ignorado (não é arquivo regular)", trimName(name))
-	p.render(status)
-}
-
-func (p *progressRenderer) finish() {
-	status := fmt.Sprintf("✅ concluido  processados: %d  ignorados: %d", p.processed, p.skipped)
-	p.render(status)
-	if p.inline {
-		fmt.Println()
-	}
-}
-
-func (p *progressRenderer) stop() {
-	if p.inline {
-		fmt.Println()
-	}
-}
-
-func (p *progressRenderer) render(status string) {
-	current := p.processed + p.skipped
-	prefix := ""
-	suffix := "\n"
-	if p.inline {
-		prefix = "\r"
-		suffix = "\033[K"
-	}
-	if p.total == 0 {
-		fmt.Printf("%s[%s] 100%% (0/0) %s%s", prefix, strings.Repeat("=", 18), status, suffix)
-		return
-	}
-
-	percent := current * 100 / p.total
-	barWidth := 18
-	filled := current * barWidth / p.total
-	if filled > barWidth {
-		filled = barWidth
-	}
-
-	bar := strings.Repeat("=", filled)
-	if filled < barWidth {
-		bar += ">"
-		bar += strings.Repeat(".", barWidth-filled-1)
-	}
-
-	if filled == barWidth {
-		bar = strings.Repeat("=", barWidth)
-	}
-
-	fmt.Printf("%s[%s] %3d%% (%d/%d) %s%s", prefix, bar, percent, current, p.total, status, suffix)
-}
-
-func trimName(name string) string {
-	const maxLen = 48
-	runes := []rune(name)
-	if len(runes) <= maxLen {
-		return name
-	}
-
-	return string(runes[:maxLen-1]) + "…"
-}
-
-func iconForCategory(category string) string {
-	switch category {
-	case "images":
-		return "🖼️"
-	case "videos":
-		return "🎬"
-	case "audio":
-		return "🎵"
-	case "documents":
-		return "📚"
-	case "archives":
-		return "🗜️"
-	case "packages":
-		return "📦"
-	case "code":
-		return "💻"
-	case "config":
-		return "⚙️"
-	case "scripts":
-		return "📜"
-	case "devops":
-		return "🛠️"
-	case "blockchain":
-		return "⛓️"
-	case "data":
-		return "📊"
-	case "design":
-		return "🎨"
-	default:
-		return "📎"
-	}
 }
