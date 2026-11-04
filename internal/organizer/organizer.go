@@ -43,10 +43,14 @@ func Run(opts Options) error {
 				progress.skipped(entry.Name(), "download em andamento")
 				continue
 			}
-			category, err := detectDirectoryCategory(fullPath)
+			category, hasInProgressDownload, err := detectDirectoryCategory(fullPath)
 			if err != nil {
 				progress.abort()
 				return fmt.Errorf("classify directory %q: %w", fullPath, err)
+			}
+			if hasInProgressDownload {
+				progress.skipped(entry.Name(), "contém download em andamento")
+				continue
 			}
 			targetPath, err := processDirectory(fullPath, category, opts)
 			if err != nil {
@@ -134,9 +138,10 @@ func processDirectory(dir, category string, opts Options) (string, error) {
 	return targetPath, nil
 }
 
-func detectDirectoryCategory(dir string) (string, error) {
+func detectDirectoryCategory(dir string) (string, bool, error) {
 	count := make(map[string]int)
 	total, tempCount := 0, 0
+	hasInProgressDownload := false
 
 	if err := filepath.WalkDir(dir, func(path string,
 		d fs.DirEntry, err error) error {
@@ -160,6 +165,7 @@ func detectDirectoryCategory(dir string) (string, error) {
 		}
 
 		if IsInProgress(d.Name()) {
+			hasInProgressDownload = true
 			return nil
 		}
 
@@ -172,7 +178,7 @@ func detectDirectoryCategory(dir string) (string, error) {
 
 		return nil
 	}); err != nil {
-		return "", err
+		return "", false, err
 	}
 
 	// Temporários só decidem a categoria quando são tudo o que a pasta tem.
@@ -182,7 +188,7 @@ func detectDirectoryCategory(dir string) (string, error) {
 	}
 
 	if total == 0 {
-		return "others", nil
+		return "others", hasInProgressDownload, nil
 	}
 
 	max := 0
@@ -200,10 +206,10 @@ func detectDirectoryCategory(dir string) (string, error) {
 	}
 
 	if tied {
-		return "others", nil
+		return "others", hasInProgressDownload, nil
 	}
 
-	return dominant, nil
+	return dominant, hasInProgressDownload, nil
 }
 
 func isRegularEntry(entry fs.DirEntry) (bool, error) {
